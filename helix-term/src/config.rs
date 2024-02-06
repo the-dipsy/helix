@@ -87,8 +87,7 @@ impl Config {
         // Load and parse global config returning all errors
         let global: ConfigRaw = fs::read_to_string(helix_loader::config_file())
             .map_err(ConfigLoadError::Error)
-            .and_then(|c| toml::from_str(&c)
-            .map_err(ConfigLoadError::BadConfig))?;
+            .and_then(|c| toml::from_str(&c).map_err(ConfigLoadError::BadConfig))?;
 
         // Load and parse workspace config if enabled ignoring IO errors
         let workspace = global.workspace_config.unwrap_or(false)
