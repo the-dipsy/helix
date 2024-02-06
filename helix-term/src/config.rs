@@ -4,6 +4,7 @@ use helix_loader::merge_toml_values;
 use helix_view::document::Mode;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::fmt::Display;
 use std::fs;
 use std::io::Error as IOError;
@@ -58,46 +59,60 @@ impl Display for ConfigLoadError {
     }
 }
 
+impl ConfigRaw {
+    fn load(file: PathBuf) -> Result<Self, ConfigLoadError> {
+        let source = fs::read_to_string(file).map_err(ConfigLoadError::Error)?;
+        toml::from_str(&source).map_err(ConfigLoadError::BadConfig)
+    }
+}
+
+impl TryFrom<ConfigRaw> for Config {
+    type Error = ConfigLoadError;
+
+    fn try_from(config: ConfigRaw) -> Result<Self, Self::Error> {
+        Ok(Self {
+            workspace_config: config.workspace_config.unwrap_or_default(),
+            theme: config.theme,
+            keys: match config.keys {
+                Some(keys) => merge_keys(keymap::default(), keys),
+                None => keymap::default(),
+            },
+            editor: config.editor
+                .map(|e| e.try_into()).transpose()
+                .map_err(ConfigLoadError::BadConfig)?
+                .unwrap_or_default(),
+        })
+    }
+}
+
 impl Config {
-    pub fn load(
-        mut global: ConfigRaw, mut workspace: Option<ConfigRaw>,
-    ) -> Result<Config, ConfigLoadError> {
-        // Create merged keymap
-        let mut keys = keymap::default();
-        [Some(&mut global), workspace.as_mut()].into_iter()
-            .flatten().filter_map(|c| c.keys.take())
-            .for_each(|k| merge_keys(&mut keys, k));
+    pub fn load() -> Result<Config, ConfigLoadError> {
+        // Load and parse global config returning all errors
+        let global: Config = ConfigRaw::load(helix_loader::config_file())?.try_into()?;
 
-        // Create config
-        let config = Config {
-            workspace_config: global.workspace_config.unwrap_or(false),
-            theme: workspace.as_mut().and_then(|c| c.theme.take()).or(global.theme),
-            keys,
-            editor: match (global.editor, workspace.and_then(|c| c.editor)) {
-                (None, None) => Ok(helix_view::editor::Config::default()),
-                (None, Some(editor)) | (Some(editor), None) => editor.try_into(),
-                (Some(glob), Some(work)) => merge_toml_values(glob, work, 3).try_into(),
-            }.map_err(ConfigLoadError::BadConfig)?,
-        };
-
-        Ok(config)
+        if global.workspace_config {
+            global.merge(ConfigRaw::load(helix_loader::workspace_config_file())?)
+        } else {
+            Ok(global)
+        }
     }
 
-    pub fn load_default() -> Result<Config, ConfigLoadError> {
-        // Load and parse global config returning all errors
-        let global: ConfigRaw = fs::read_to_string(helix_loader::config_file())
-            .map_err(ConfigLoadError::Error)
-            .and_then(|c| toml::from_str(&c).map_err(ConfigLoadError::BadConfig))?;
-
-        // Load and parse workspace config if enabled ignoring IO errors
-        let workspace = global.workspace_config.unwrap_or(false)
-            .then(|| helix_loader::workspace_config_file())
-            .and_then(|f| fs::read_to_string(f).ok())
-            .map(|c| toml::from_str(&c).map_err(ConfigLoadError::BadConfig))
-            .transpose()?;
-
-        // Create merged config
-        Config::load(global, workspace)
+    fn merge(self, other: ConfigRaw) -> Result<Self, ConfigLoadError> {
+        Ok(Config {
+            workspace_config: other.workspace_config.unwrap_or(self.workspace_config),
+            theme: other.theme.or(self.theme),
+            keys: match other.keys {
+                Some(keys) => merge_keys(self.keys, keys),
+                None => self.keys,
+            },
+            editor: match other.editor {
+                None => self.editor,
+                Some(editor) => merge_toml_values(
+                    toml::Value::try_from(self.editor).unwrap(),
+                    editor, 3
+                ).try_into().map_err(ConfigLoadError::BadConfig)?,
+            }
+        })
     }
 }
 
@@ -107,7 +122,8 @@ mod tests {
 
     impl Config {
         fn load_test(file: &str) -> Config {
-            Config::load(toml::from_str(file).unwrap(), None).unwrap()
+            let raw: ConfigRaw = toml::from_str(file).unwrap();
+            raw.try_into().unwrap()
         }
     }
 
@@ -126,9 +142,8 @@ mod tests {
             A-F12 = "move_next_word_end"
         "#;
 
-        let mut keys = keymap::default();
-        merge_keys(
-            &mut keys,
+        let keys = merge_keys(
+            keymap::default(),
             hashmap! {
                 Mode::Insert => keymap!({ "Insert mode"
                     "y" => move_line_down,
