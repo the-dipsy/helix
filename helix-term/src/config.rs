@@ -11,14 +11,16 @@ use toml::de::Error as TomlError;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
+    pub workspace_config: bool,
     pub theme: Option<String>,
     pub keys: HashMap<Mode, KeyTrie>,
     pub editor: helix_view::editor::Config,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ConfigRaw {
+    pub workspace_config: Option<bool>,
     pub theme: Option<String>,
     pub keys: Option<HashMap<Mode, KeyTrie>>,
     pub editor: Option<toml::Value>,
@@ -27,6 +29,7 @@ pub struct ConfigRaw {
 impl Default for Config {
     fn default() -> Config {
         Config {
+            workspace_config: false,
             theme: None,
             keys: keymap::default(),
             editor: helix_view::editor::Config::default(),
@@ -57,72 +60,45 @@ impl Display for ConfigLoadError {
 
 impl Config {
     pub fn load(
-        global: Result<String, ConfigLoadError>,
-        local: Result<String, ConfigLoadError>,
+        mut global: ConfigRaw, mut workspace: Option<ConfigRaw>,
     ) -> Result<Config, ConfigLoadError> {
-        let global_config: Result<ConfigRaw, ConfigLoadError> =
-            global.and_then(|file| toml::from_str(&file).map_err(ConfigLoadError::BadConfig));
-        let local_config: Result<ConfigRaw, ConfigLoadError> =
-            local.and_then(|file| toml::from_str(&file).map_err(ConfigLoadError::BadConfig));
-        let res = match (global_config, local_config) {
-            (Ok(global), Ok(local)) => {
-                let mut keys = keymap::default();
-                if let Some(global_keys) = global.keys {
-                    merge_keys(&mut keys, global_keys)
-                }
-                if let Some(local_keys) = local.keys {
-                    merge_keys(&mut keys, local_keys)
-                }
+        // Create merged keymap
+        let mut keys = keymap::default();
+        [Some(&mut global), workspace.as_mut()].into_iter()
+            .flatten().filter_map(|c| c.keys.take())
+            .for_each(|k| merge_keys(&mut keys, k));
 
-                let editor = match (global.editor, local.editor) {
-                    (None, None) => helix_view::editor::Config::default(),
-                    (None, Some(val)) | (Some(val), None) => {
-                        val.try_into().map_err(ConfigLoadError::BadConfig)?
-                    }
-                    (Some(global), Some(local)) => merge_toml_values(global, local, 3)
-                        .try_into()
-                        .map_err(ConfigLoadError::BadConfig)?,
-                };
-
-                Config {
-                    theme: local.theme.or(global.theme),
-                    keys,
-                    editor,
-                }
-            }
-            // if any configs are invalid return that first
-            (_, Err(ConfigLoadError::BadConfig(err)))
-            | (Err(ConfigLoadError::BadConfig(err)), _) => {
-                return Err(ConfigLoadError::BadConfig(err))
-            }
-            (Ok(config), Err(_)) | (Err(_), Ok(config)) => {
-                let mut keys = keymap::default();
-                if let Some(keymap) = config.keys {
-                    merge_keys(&mut keys, keymap);
-                }
-                Config {
-                    theme: config.theme,
-                    keys,
-                    editor: config.editor.map_or_else(
-                        || Ok(helix_view::editor::Config::default()),
-                        |val| val.try_into().map_err(ConfigLoadError::BadConfig),
-                    )?,
-                }
-            }
-
-            // these are just two io errors return the one for the global config
-            (Err(err), Err(_)) => return Err(err),
+        // Create config
+        let config = Config {
+            workspace_config: global.workspace_config.unwrap_or(false),
+            theme: workspace.as_mut().and_then(|c| c.theme.take()).or(global.theme),
+            keys,
+            editor: match (global.editor, workspace.and_then(|c| c.editor)) {
+                (None, None) => Ok(helix_view::editor::Config::default()),
+                (None, Some(editor)) | (Some(editor), None) => editor.try_into(),
+                (Some(glob), Some(work)) => merge_toml_values(glob, work, 3).try_into(),
+            }.map_err(ConfigLoadError::BadConfig)?,
         };
 
-        Ok(res)
+        Ok(config)
     }
 
     pub fn load_default() -> Result<Config, ConfigLoadError> {
-        let global_config =
-            fs::read_to_string(helix_loader::config_file()).map_err(ConfigLoadError::Error);
-        let local_config = fs::read_to_string(helix_loader::workspace_config_file())
-            .map_err(ConfigLoadError::Error);
-        Config::load(global_config, local_config)
+        // Load and parse global config returning all errors
+        let global: ConfigRaw = fs::read_to_string(helix_loader::config_file())
+            .map_err(ConfigLoadError::Error)
+            .and_then(|c| toml::from_str(&c)
+            .map_err(ConfigLoadError::BadConfig))?;
+
+        // Load and parse workspace config if enabled ignoring IO errors
+        let workspace: Option<ConfigRaw> = global.workspace_config.unwrap_or(false)
+            .then(|| helix_loader::workspace_config_file())
+            .and_then(|f| fs::read_to_string(f).ok())
+            .map(|c| toml::from_str(&c).map_err(ConfigLoadError::BadConfig))
+            .transpose()?;
+
+        // Create merged config
+        Config::load(global, workspace)
     }
 }
 
@@ -131,8 +107,8 @@ mod tests {
     use super::*;
 
     impl Config {
-        fn load_test(config: &str) -> Config {
-            Config::load(Ok(config.to_owned()), Err(ConfigLoadError::default())).unwrap()
+        fn load_test(file: &str) -> Config {
+            Config::load(toml::from_str(file).unwrap(), None).unwrap()
         }
     }
 
