@@ -91,7 +91,7 @@ impl Config {
             .map_err(ConfigLoadError::BadConfig))?;
 
         // Load and parse workspace config if enabled ignoring IO errors
-        let workspace: Option<ConfigRaw> = global.workspace_config.unwrap_or(false)
+        let workspace = global.workspace_config.unwrap_or(false)
             .then(|| helix_loader::workspace_config_file())
             .and_then(|f| fs::read_to_string(f).ok())
             .map(|c| toml::from_str(&c).map_err(ConfigLoadError::BadConfig))
