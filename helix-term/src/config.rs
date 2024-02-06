@@ -10,34 +10,7 @@ use std::fs;
 use std::io::Error as IOError;
 use toml::de::Error as TomlError;
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Config {
-    pub workspace_config: bool,
-    pub theme: Option<String>,
-    pub keys: HashMap<Mode, KeyTrie>,
-    pub editor: helix_view::editor::Config,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ConfigRaw {
-    pub workspace_config: Option<bool>,
-    pub theme: Option<String>,
-    pub keys: Option<HashMap<Mode, KeyTrie>>,
-    pub editor: Option<toml::Value>,
-}
-
-impl Default for Config {
-    fn default() -> Config {
-        Config {
-            workspace_config: false,
-            theme: None,
-            keys: keymap::default(),
-            editor: helix_view::editor::Config::default(),
-        }
-    }
-}
-
+// Config loading error
 #[derive(Debug)]
 pub enum ConfigLoadError {
     BadConfig(TomlError),
@@ -50,11 +23,24 @@ impl Default for ConfigLoadError {
     }
 }
 
-impl Display for ConfigLoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ConfigLoadError::BadConfig(err) => err.fmt(f),
-            ConfigLoadError::Error(err) => err.fmt(f),
+
+// Deserializable raw config struct
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ConfigRaw {
+    pub workspace_config: Option<bool>,
+    pub theme: Option<String>,
+    pub keys: Option<HashMap<Mode, KeyTrie>>,
+    pub editor: Option<toml::Value>,
+}
+
+impl Default for ConfigRaw {
+    fn default() -> ConfigRaw {
+        Self {
+            workspace_config: Some(false),
+            theme: None,
+            keys: Some(keymap::default()),
+            editor: None,
         }
     }
 }
@@ -63,6 +49,54 @@ impl ConfigRaw {
     fn load(file: PathBuf) -> Result<Self, ConfigLoadError> {
         let source = fs::read_to_string(file).map_err(ConfigLoadError::Error)?;
         toml::from_str(&source).map_err(ConfigLoadError::BadConfig)
+    }
+
+    fn merge(self, other: ConfigRaw, trust: bool) -> Self {
+        ConfigRaw {
+            workspace_config: match trust {
+                true =>  other.workspace_config.or(self.workspace_config),
+                false => self.workspace_config,
+            },
+            theme: other.theme.or(self.theme),
+            keys: match (self.keys, other.keys) {
+                (Some(a), Some(b)) => Some(merge_keys(a, b)),
+                (opt_a, opt_b) => opt_a.or(opt_b),
+            },
+            editor: match (self.editor, other.editor) {
+                (Some(a), Some(b)) => Some(merge_toml_values(a, b, 3)),
+                (opt_a, opt_b) => opt_a.or(opt_b),
+            }
+        }
+    }
+}
+
+// Final config struct
+#[derive(Debug, Clone, PartialEq)]
+pub struct Config {
+    pub workspace_config: bool,
+    pub theme: Option<String>,
+    pub keys: HashMap<Mode, KeyTrie>,
+    pub editor: helix_view::editor::Config,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        let raw = ConfigRaw::default();
+        Self {
+            workspace_config: raw.workspace_config.unwrap_or_default(),
+            theme: raw.theme,
+            keys: raw.keys.unwrap_or_else(|| keymap::default()),
+            editor: helix_view::editor::Config::default(),
+        }
+    }
+}
+
+impl Display for ConfigLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigLoadError::BadConfig(err) => err.fmt(f),
+            ConfigLoadError::Error(err) => err.fmt(f),
+        }
     }
 }
 
@@ -73,10 +107,7 @@ impl TryFrom<ConfigRaw> for Config {
         Ok(Self {
             workspace_config: config.workspace_config.unwrap_or_default(),
             theme: config.theme,
-            keys: match config.keys {
-                Some(keys) => merge_keys(keymap::default(), keys),
-                None => keymap::default(),
-            },
+            keys: config.keys.unwrap_or_else(|| keymap::default()),
             editor: config.editor
                 .map(|e| e.try_into()).transpose()
                 .map_err(ConfigLoadError::BadConfig)?
@@ -87,32 +118,17 @@ impl TryFrom<ConfigRaw> for Config {
 
 impl Config {
     pub fn load() -> Result<Config, ConfigLoadError> {
-        // Load and parse global config returning all errors
-        let global: Config = ConfigRaw::load(helix_loader::config_file())?.try_into()?;
+        let default = ConfigRaw::default();
+        let global = default.merge(ConfigRaw::load(helix_loader::config_file())?, true);
 
-        if global.workspace_config {
-            global.merge(ConfigRaw::load(helix_loader::workspace_config_file())?)
-        } else {
-            Ok(global)
-        }
-    }
-
-    fn merge(self, other: ConfigRaw) -> Result<Self, ConfigLoadError> {
-        Ok(Config {
-            workspace_config: other.workspace_config.unwrap_or(self.workspace_config),
-            theme: other.theme.or(self.theme),
-            keys: match other.keys {
-                Some(keys) => merge_keys(self.keys, keys),
-                None => self.keys,
-            },
-            editor: match other.editor {
-                None => self.editor,
-                Some(editor) => merge_toml_values(
-                    toml::Value::try_from(self.editor).unwrap(),
-                    editor, 3
-                ).try_into().map_err(ConfigLoadError::BadConfig)?,
-            }
-        })
+        match global.workspace_config.unwrap_or_default() {
+            false => global,
+            true => match ConfigRaw::load(helix_loader::workspace_config_file()) {
+                Ok(workspace) => Ok(global.merge(workspace, false)),
+                Err(ConfigLoadError::Error(_)) => Ok(global),
+                error => error,
+            }?,
+       }.try_into()
     }
 }
 
@@ -123,7 +139,7 @@ mod tests {
     impl Config {
         fn load_test(file: &str) -> Config {
             let raw: ConfigRaw = toml::from_str(file).unwrap();
-            raw.try_into().unwrap()
+            ConfigRaw::default().merge(raw, true).try_into().unwrap()
         }
     }
 
