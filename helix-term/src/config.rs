@@ -23,12 +23,19 @@ impl Default for ConfigLoadError {
     }
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadWorkspaceConfig {
+    #[default]
+    Never,
+    Always,
+}
 
 // Deserializable raw config struct
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ConfigRaw {
-    pub workspace_config: Option<bool>,
+    pub load_workspace_config: Option<LoadWorkspaceConfig>,
     pub theme: Option<String>,
     pub keys: Option<HashMap<Mode, KeyTrie>>,
     pub editor: Option<toml::Value>,
@@ -37,7 +44,7 @@ pub struct ConfigRaw {
 impl Default for ConfigRaw {
     fn default() -> ConfigRaw {
         Self {
-            workspace_config: Some(false),
+            load_workspace_config: Some(LoadWorkspaceConfig::default()),
             theme: None,
             keys: Some(keymap::default()),
             editor: None,
@@ -53,9 +60,9 @@ impl ConfigRaw {
 
     fn merge(self, other: ConfigRaw, trust: bool) -> Self {
         ConfigRaw {
-            workspace_config: match trust {
-                true =>  other.workspace_config.or(self.workspace_config),
-                false => self.workspace_config,
+            load_workspace_config: match trust {
+                true =>  other.load_workspace_config.or(self.load_workspace_config),
+                false => self.load_workspace_config,
             },
             theme: other.theme.or(self.theme),
             keys: match (self.keys, other.keys) {
@@ -73,7 +80,7 @@ impl ConfigRaw {
 // Final config struct
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    pub workspace_config: bool,
+    pub load_workspace_config: LoadWorkspaceConfig,
     pub theme: Option<String>,
     pub keys: HashMap<Mode, KeyTrie>,
     pub editor: helix_view::editor::Config,
@@ -83,7 +90,7 @@ impl Default for Config {
     fn default() -> Config {
         let raw = ConfigRaw::default();
         Self {
-            workspace_config: raw.workspace_config.unwrap_or_default(),
+            load_workspace_config: raw.load_workspace_config.unwrap_or_default(),
             theme: raw.theme,
             keys: raw.keys.unwrap_or_else(|| keymap::default()),
             editor: helix_view::editor::Config::default(),
@@ -105,7 +112,7 @@ impl TryFrom<ConfigRaw> for Config {
 
     fn try_from(config: ConfigRaw) -> Result<Self, Self::Error> {
         Ok(Self {
-            workspace_config: config.workspace_config.unwrap_or_default(),
+            load_workspace_config: config.load_workspace_config.unwrap_or_default(),
             theme: config.theme,
             keys: config.keys.unwrap_or_else(|| keymap::default()),
             editor: config.editor
@@ -121,13 +128,15 @@ impl Config {
         let default = ConfigRaw::default();
         let global = default.merge(ConfigRaw::load(helix_loader::config_file())?, true);
 
-        match global.workspace_config.unwrap_or_default() {
-            false => global,
-            true => match ConfigRaw::load(helix_loader::workspace_config_file()) {
-                Ok(workspace) => Ok(global.merge(workspace, false)),
-                Err(ConfigLoadError::Error(_)) => Ok(global),
-                error => error,
-            }?,
+        match global.load_workspace_config {
+            Some(LoadWorkspaceConfig::Always) => {
+                match ConfigRaw::load(helix_loader::workspace_config_file()) {
+                    Ok(workspace) => Ok(global.merge(workspace, false)),
+                    Err(ConfigLoadError::Error(_)) => Ok(global),
+                    error => error,
+                }?
+            },
+            _ => global,
        }.try_into()
     }
 }
