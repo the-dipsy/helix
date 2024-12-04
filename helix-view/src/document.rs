@@ -893,6 +893,7 @@ impl Document {
         let last_saved_time = self.last_saved_time;
 
         // We encode the file according to the `Document`'s encoding.
+        let write_backup = self.config.load().write_backup;
         let future = async move {
             use tokio::fs;
             if let Some(parent) = path.parent() {
@@ -937,7 +938,7 @@ impl Document {
 
             // Assume it is a hardlink to prevent data loss if the metadata cant be read (e.g. on certain Windows configurations)
             let is_hardlink = helix_stdx::faccess::hardlink_count(&write_path).unwrap_or(2) > 1;
-            let backup = if path.exists() {
+            let backup = if write_backup && path.exists() {
                 let path_ = write_path.clone();
                 // hacks: we use tempfile to handle the complex task of creating
                 // non clobbered temporary path for us we don't want

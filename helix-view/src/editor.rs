@@ -337,6 +337,8 @@ pub struct Config {
     pub default_line_ending: LineEndingConfig,
     /// Whether to automatically insert a trailing line-ending on write if missing. Defaults to `true`.
     pub insert_final_newline: bool,
+    /// Whether to create a backup when saving a file to prevent file corruption.
+    pub write_backup: bool,
     /// Enables smart tab
     pub smart_tab: Option<SmartTabConfig>,
     /// Draw border around popups.
@@ -988,6 +990,7 @@ impl Default for Config {
             workspace_lsp_roots: Vec::new(),
             default_line_ending: LineEndingConfig::default(),
             insert_final_newline: true,
+            write_backup: true,
             smart_tab: Some(SmartTabConfig::default()),
             popup_border: PopupBorderConfig::None,
             indent_heuristic: IndentationHeuristic::default(),
